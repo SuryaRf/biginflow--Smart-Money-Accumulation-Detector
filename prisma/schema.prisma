@@ -1,0 +1,164 @@
+// Prisma schema for BigInflow - Smart Money Accumulation Detector
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Watchlist saham mid-cap yang ditrack
+model Stock {
+  id        String   @id @default(uuid())
+  ticker    String   @unique @db.VarChar(10)
+  name      String   @db.VarChar(255)
+  marketCap BigInt?  @map("market_cap") // dalam juta rupiah
+  sector    String?  @db.VarChar(100)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  transactions BrokerTransaction[]
+  signals      DailySignal[]
+  prices       StockPrice[]
+
+  @@map("stocks")
+}
+
+// Master data broker
+model Broker {
+  id        String         @id @default(uuid())
+  code      String         @unique @db.VarChar(10)
+  name      String         @db.VarChar(255)
+  category  BrokerCategory @default(OTHER)
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  transactions BrokerTransaction[]
+
+  @@map("brokers")
+}
+
+enum BrokerCategory {
+  FOREIGN     // Asing (UBS, JPMorgan, CLSA, dll)
+  LOCAL_FUND  // Lokal Fund (Mandiri Sekuritas, BRI Danareksa, dll)
+  RETAIL      // Ritel (Indo Premier, Ajaib, Stockbit, dll)
+  OTHER       // Lainnya
+}
+
+// Daily stock price data
+model StockPrice {
+  id        String   @id @default(uuid())
+  stockId   String   @map("stock_id")
+  date      DateTime @db.Date
+  open      Decimal  @db.Decimal(20, 2)
+  high      Decimal  @db.Decimal(20, 2)
+  low       Decimal  @db.Decimal(20, 2)
+  close     Decimal  @db.Decimal(20, 2)
+  volume    BigInt
+  change    Decimal  @db.Decimal(10, 2) // Change in rupiah
+  changePct Decimal  @map("change_pct") @db.Decimal(8, 4) // Change in percentage
+  createdAt DateTime @default(now()) @map("created_at")
+
+  stock Stock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, date])
+  @@index([date])
+  @@map("stock_prices")
+}
+
+// Raw data transaksi broker harian (aggregate data)
+model BrokerTransaction {
+  id        String   @id @default(uuid())
+  stockId   String   @map("stock_id")
+  brokerId  String   @map("broker_id")
+  date      DateTime @db.Date
+  volume    BigInt   // Total volume traded by this broker
+  value     Decimal  @db.Decimal(20, 2) // Total value in rupiah
+  frequency Int      @default(0) // Number of transactions
+  createdAt DateTime @default(now()) @map("created_at")
+
+  stock  Stock  @relation(fields: [stockId], references: [id], onDelete: Cascade)
+  broker Broker @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, brokerId, date])
+  @@index([date])
+  @@index([stockId, date])
+  @@map("broker_transactions")
+}
+
+// Hasil scoring harian per saham
+model DailySignal {
+  id               String   @id @default(uuid())
+  stockId          String   @map("stock_id")
+  date             DateTime @db.Date
+
+  // Broker participation metrics (% of total value)
+  foreignPct       Decimal  @map("foreign_pct") @db.Decimal(8, 4) // Foreign participation %
+  localFundPct     Decimal  @map("local_fund_pct") @db.Decimal(8, 4) // Local fund %
+  retailPct        Decimal  @map("retail_pct") @db.Decimal(8, 4) // Retail %
+
+  // Absolute values
+  foreignValue     Decimal  @map("foreign_value") @db.Decimal(20, 2)
+  localFundValue   Decimal  @map("local_fund_value") @db.Decimal(20, 2)
+  retailValue      Decimal  @map("retail_value") @db.Decimal(20, 2)
+  totalValue       Decimal  @map("total_value") @db.Decimal(20, 2)
+
+  // Price correlation
+  priceChange      Decimal  @map("price_change") @db.Decimal(10, 2) // Price change in rupiah
+  priceChangePct   Decimal  @map("price_change_pct") @db.Decimal(8, 4) // Price change %
+  priceDirection   Int      @map("price_direction") // 1=up, 0=flat, -1=down
+
+  // Scoring components
+  score            Int      @default(0) // 0-100
+  scoreForeign     Int      @default(0) @map("score_foreign") // 0-30
+  scoreFund        Int      @default(0) @map("score_fund") // 0-20
+  scoreRetail      Int      @default(0) @map("score_retail") // 0-20
+  scoreStreak      Int      @default(0) @map("score_streak") // 0-20
+  scoreVolume      Int      @default(0) @map("score_volume") // 0-10
+
+  streakDays       Int      @default(1) @map("streak_days")
+  volumeRatio      Decimal  @default(1.0) @map("volume_ratio") @db.Decimal(5, 2)
+  isSignal         Boolean  @default(false) @map("is_signal")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  stock Stock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@unique([stockId, date])
+  @@index([date])
+  @@index([isSignal, date])
+  @@map("daily_signals")
+}
+
+// Log untuk monitoring scraping
+model ScrapeLog {
+  id              String      @id @default(uuid())
+  date            DateTime    @db.Date
+  status          ScrapeStatus
+  stocksProcessed Int         @default(0) @map("stocks_processed")
+  stocksFailed    Int         @default(0) @map("stocks_failed")
+  startedAt       DateTime    @map("started_at")
+  completedAt     DateTime?   @map("completed_at")
+  errorMessage    String?     @map("error_message") @db.Text
+  createdAt       DateTime    @default(now()) @map("created_at")
+
+  @@map("scrape_logs")
+}
+
+enum ScrapeStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+// Settings untuk konfigurasi sistem
+model Setting {
+  id        String   @id @default(uuid())
+  key       String   @unique @db.VarChar(100)
+  value     String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("settings")
+}
